@@ -1,0 +1,102 @@
+services:
+  # -------------------------------------------------------
+  # 1. STORAGE LAYER (MinIO) - Your "Data Lake"
+  # -------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: minio_lake
+      - "9000:9000" # API Port (For Spark/NiFi to talk to)
+      - "9001:9001" # Console Port (For you to view files in browser)
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - data-pipeline-net
+
+  # Auto-create the 'lakehouse' bucket so you don't have to do it manually
+  minio-setup:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (mc alias set myminio http://minio:9000 admin password123); do echo '...waiting for minio...'; sleep 5; done;
+      mc mb myminio/lakehouse;
+      mc anonymous set public myminio/lakehouse;
+      exit 0;
+      "
+    networks:
+      - data-pipeline-net
+
+  # -------------------------------------------------------
+  # 2. INGESTION LAYER (Apache NiFi)
+  # -------------------------------------------------------
+  nifi:
+    image: apache/nifi:latest
+    container_name: nifi_ingestion
+    ports:
+      - "8443:8443" # Web UI Port (https://localhost:8443)
+    environment:
+      - SINGLE_USER_CREDENTIALS_USERNAME=admin
+      - SINGLE_USER_CREDENTIALS_PASSWORD=password12345678 # Must be >12 chars
+      - NIFI_WEB_HTTP_PORT= # Disable HTTP
+      - NIFI_WEB_HTTPS_PORT=8443
+    networks:
+      - data-pipeline-net
+    volumes:
+      - ./nifi_data:/opt/nifi/nifi-current/data
+
+  # -------------------------------------------------------
+  # 3. PROCESSING LAYER (Apache Spark)
+  # -------------------------------------------------------
+  spark-master:
+    image: bitnamilegacy/spark:3.5
+    container_name: spark_master
+    environment:
+      - SPARK_MODE=master
+    ports:
+      - "8080:8080" # Spark Master UI
+      - "7077:7077" # Spark Job Submission Port
+    networks:
+      - data-pipeline-net
+
+  spark-worker:
+    image: bitnamilegacy/spark:3.5
+    container_name: spark_worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    depends_on:
+      - spark-master
+    networks:
+      - data-pipeline-net
+
+  # -------------------------------------------------------
+  # 4. VISUALIZATION & WAREHOUSE (Superset + DuckDB)
+  # -------------------------------------------------------
+  superset:
+    build: ./superset # Builds the custom image with DuckDB
+    container_name: superset_viz
+    ports:
+      - "8088:8088" # Web UI
+    environment:
+      - SUPERSET_SECRET_KEY=your_secret_key_change_this
+    command: >
+      /bin/sh -c "
+      superset fab create-admin --username admin --firstname Superset --lastname Admin --email admin@superset.com --password admin &&
+      superset db upgrade &&
+      superset init &&
+      /usr/bin/run-server.sh"
+    networks:
+      - data-pipeline-net
+
+volumes:
+  minio_data:
+  nifi_data:
+
+networks:
+  data-pipeline-net:
+    driver: bridge
