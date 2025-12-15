@@ -5,6 +5,7 @@ services:
   minio:
     image: minio/minio:latest
     container_name: minio_lake
+    ports:
       - "9000:9000" # API Port (For Spark/NiFi to talk to)
       - "9001:9001" # Console Port (For you to view files in browser)
     environment:
